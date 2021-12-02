@@ -4,32 +4,48 @@ GOMODULE= $(shell go list -m)
 VERPKG=$(GOMODULE)/version
 IMAGE=docker.io/lyp256/proxy:latest
 
+PKGS= $(shell go list ./... |grep -v vendor |xargs echo)
+
+
 .PHONY: fmt
 fmt:
-	go fmt ./...
+	go fmt $(PKGS)
+
+.PHONY: tidy
+tidy:
+	go mod tidy
 
 .PHONY: vet
 vet:
-	go vet ./...
+	go vet $(PKGS)
 
 .PHONY: all-check
-all-check:
+all-check:tidy fmt vet git-check
 
 .PHONY: git-check
 git-check:
 	git diff --exit-code
 
+.PHONY: test
+test:
+	go test $(PKGS)
+
 .PHONY: build
 build:
 	CGO_ENABLED=0 go build -ldflags "-X $(VERPKG).Version=$(VER) -X $(VERPKG).CommitID=$(COMMIT)" -o build/ ./cmd/...
 
-.PHONY: build
-docker:
+.PHONY: docker-build
+docker-build:
 	docker build --tag $(IMAGE) .
 
 .PHONY: docker-push
 docker-push:
+	docker images
 	docker push $(IMAGE)
 
 .PHONY: docker-release
 docker-release: docker-build docker-push
+
+oci-release:
+	podman build --tag dst-image .
+	podman push dst-image docker://$(IMAGE)
