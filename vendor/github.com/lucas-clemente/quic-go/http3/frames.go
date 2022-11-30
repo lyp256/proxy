@@ -2,50 +2,71 @@ package http3
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 
 	"github.com/lucas-clemente/quic-go/internal/protocol"
 	"github.com/lucas-clemente/quic-go/quicvarint"
 )
 
+// FrameType is the frame type of a HTTP/3 frame
+type FrameType uint64
+
+type unknownFrameHandlerFunc func(FrameType, error) (processed bool, err error)
+
 type frame interface{}
 
-func parseNextFrame(r io.Reader) (frame, error) {
-	qr := quicvarint.NewReader(r)
-	t, err := quicvarint.Read(qr)
-	if err != nil {
-		return nil, err
-	}
-	l, err := quicvarint.Read(qr)
-	if err != nil {
-		return nil, err
-	}
+var errHijacked = errors.New("hijacked")
 
-	switch t {
-	case 0x0:
-		return &dataFrame{Length: l}, nil
-	case 0x1:
-		return &headersFrame{Length: l}, nil
-	case 0x4:
-		return parseSettingsFrame(r, l)
-	case 0x3: // CANCEL_PUSH
-		fallthrough
-	case 0x5: // PUSH_PROMISE
-		fallthrough
-	case 0x7: // GOAWAY
-		fallthrough
-	case 0xd: // MAX_PUSH_ID
-		fallthrough
-	case 0xe: // DUPLICATE_PUSH
-		fallthrough
-	default:
-		// skip over unknown frames
-		if _, err := io.CopyN(ioutil.Discard, qr, int64(l)); err != nil {
+func parseNextFrame(r io.Reader, unknownFrameHandler unknownFrameHandlerFunc) (frame, error) {
+	qr := quicvarint.NewReader(r)
+	for {
+		t, err := quicvarint.Read(qr)
+		if err != nil {
+			if unknownFrameHandler != nil {
+				hijacked, err := unknownFrameHandler(0, err)
+				if err != nil {
+					return nil, err
+				}
+				if hijacked {
+					return nil, errHijacked
+				}
+			}
 			return nil, err
 		}
-		return parseNextFrame(qr)
+		// Call the unknownFrameHandler for frames not defined in the HTTP/3 spec
+		if t > 0xd && unknownFrameHandler != nil {
+			hijacked, err := unknownFrameHandler(FrameType(t), nil)
+			if err != nil {
+				return nil, err
+			}
+			if hijacked {
+				return nil, errHijacked
+			}
+			// If the unknownFrameHandler didn't process the frame, it is our responsibility to skip it.
+		}
+		l, err := quicvarint.Read(qr)
+		if err != nil {
+			return nil, err
+		}
+
+		switch t {
+		case 0x0:
+			return &dataFrame{Length: l}, nil
+		case 0x1:
+			return &headersFrame{Length: l}, nil
+		case 0x4:
+			return parseSettingsFrame(r, l)
+		case 0x3: // CANCEL_PUSH
+		case 0x5: // PUSH_PROMISE
+		case 0x7: // GOAWAY
+		case 0xd: // MAX_PUSH_ID
+		}
+		// skip over unknown frames
+		if _, err := io.CopyN(io.Discard, qr, int64(l)); err != nil {
+			return nil, err
+		}
 	}
 }
 
@@ -53,25 +74,25 @@ type dataFrame struct {
 	Length uint64
 }
 
-func (f *dataFrame) Write(b *bytes.Buffer) {
-	quicvarint.Write(b, 0x0)
-	quicvarint.Write(b, f.Length)
+func (f *dataFrame) Append(b []byte) []byte {
+	b = quicvarint.Append(b, 0x0)
+	return quicvarint.Append(b, f.Length)
 }
 
 type headersFrame struct {
 	Length uint64
 }
 
-func (f *headersFrame) Write(b *bytes.Buffer) {
-	quicvarint.Write(b, 0x1)
-	quicvarint.Write(b, f.Length)
+func (f *headersFrame) Append(b []byte) []byte {
+	b = quicvarint.Append(b, 0x1)
+	return quicvarint.Append(b, f.Length)
 }
 
-const settingDatagram = 0x276
+const settingDatagram = 0xffd277
 
 type settingsFrame struct {
 	Datagram bool
-	other    map[uint64]uint64 // all settings that we don't explicitly recognize
+	Other    map[uint64]uint64 // all settings that we don't explicitly recognize
 }
 
 func parseSettingsFrame(r io.Reader, l uint64) (*settingsFrame, error) {
@@ -109,34 +130,35 @@ func parseSettingsFrame(r io.Reader, l uint64) (*settingsFrame, error) {
 			}
 			frame.Datagram = val == 1
 		default:
-			if _, ok := frame.other[id]; ok {
+			if _, ok := frame.Other[id]; ok {
 				return nil, fmt.Errorf("duplicate setting: %d", id)
 			}
-			if frame.other == nil {
-				frame.other = make(map[uint64]uint64)
+			if frame.Other == nil {
+				frame.Other = make(map[uint64]uint64)
 			}
-			frame.other[id] = val
+			frame.Other[id] = val
 		}
 	}
 	return frame, nil
 }
 
-func (f *settingsFrame) Write(b *bytes.Buffer) {
-	quicvarint.Write(b, 0x4)
+func (f *settingsFrame) Append(b []byte) []byte {
+	b = quicvarint.Append(b, 0x4)
 	var l protocol.ByteCount
-	for id, val := range f.other {
+	for id, val := range f.Other {
 		l += quicvarint.Len(id) + quicvarint.Len(val)
 	}
 	if f.Datagram {
 		l += quicvarint.Len(settingDatagram) + quicvarint.Len(1)
 	}
-	quicvarint.Write(b, uint64(l))
+	b = quicvarint.Append(b, uint64(l))
 	if f.Datagram {
-		quicvarint.Write(b, settingDatagram)
-		quicvarint.Write(b, 1)
+		b = quicvarint.Append(b, settingDatagram)
+		b = quicvarint.Append(b, 1)
 	}
-	for id, val := range f.other {
-		quicvarint.Write(b, id)
-		quicvarint.Write(b, val)
+	for id, val := range f.Other {
+		b = quicvarint.Append(b, id)
+		b = quicvarint.Append(b, val)
 	}
+	return b
 }
