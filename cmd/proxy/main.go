@@ -33,7 +33,7 @@ func main() {
 		v          bool
 	)
 	pflag.StringVar(&httpAddr, "http", ":80", "listen http port. example :80")
-	pflag.StringVar(&httpsAddr, "https", ":443", "listen https port. example :443")
+	pflag.StringVar(&httpsAddr, "https", "", "listen https port. example :443")
 	pflag.StringVar(&certFile, "cert", "", "tls cert file")
 	pflag.StringVar(&keyFile, "key", "", "tls key file")
 	pflag.StringVar(&StaticRoot, "static", "", "static resource root. example /srv/www")
@@ -137,7 +137,7 @@ func main() {
 		httpServer := &http.Server{
 			Handler: proxyHandle,
 		}
-		if !insecure {
+		if !insecure && httpsAddr != "" {
 			httpServer.Handler = http.HandlerFunc(RedirectHTTPS)
 		}
 		wg.Add(1)

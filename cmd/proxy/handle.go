@@ -25,7 +25,6 @@ func proxyHandler(
 		vless:     vless.NewHandler(),
 		vlessPath: vlessPath,
 		users:     authUsers,
-		insecure:  insecure,
 		setHeader: setHeader,
 	}
 }
@@ -36,7 +35,6 @@ type handle struct {
 	vless     http.Handler
 	vlessPath string
 	users     auth
-	insecure  bool
 	setHeader func(header http.Header) error
 }
 
