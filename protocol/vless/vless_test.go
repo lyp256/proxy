@@ -48,6 +48,6 @@ func TestVLESSRequest2(t *testing.T) {
 	require.Equal(t,
 		fmt.Sprintf("%s:%s", expReq.Address.String(), expReq.Port),
 		aclReq.DestAddr())
-	require.Equal(t, byte(expReq.Command), aclReq.Command())
+	require.Equal(t, expReq.Command, aclReq.Command())
 	require.True(t, account.ID.UUID() == aclReq.UUID())
 }
