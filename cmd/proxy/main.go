@@ -11,9 +11,10 @@ import (
 	"syscall"
 
 	"github.com/lucas-clemente/quic-go/http3"
-	"github.com/lyp256/proxy/version"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/pflag"
+
+	"github.com/lyp256/proxy/version"
 )
 
 func main() {
@@ -31,14 +32,14 @@ func main() {
 		insecure   bool
 		v          bool
 	)
-	pflag.StringVar(&httpAddr, "http", "", "listen http port. example :80")
+	pflag.StringVar(&httpAddr, "http", ":80", "listen http port. example :80")
 	pflag.StringVar(&httpsAddr, "https", "", "listen https port. example :443")
 	pflag.StringVar(&certFile, "cert", "", "tls cert file")
 	pflag.StringVar(&keyFile, "key", "", "tls key file")
 	pflag.StringVar(&StaticRoot, "static", "", "static resource root. example /srv/www")
 	pflag.StringSliceVarP(&authUsers, "user", "u", nil, "proxy auth user. example admin:123456")
-	pflag.StringVar(&logLevel, "log", "", "log level. one of panic,fatal,error,warning,info,debug,trace")
-	pflag.StringVar(&vless, "vless", "", "vless path. example /vless")
+	pflag.StringVar(&logLevel, "log", "warning", "log level. one of panic,fatal,error,warning,info,debug,trace")
+	pflag.StringVar(&vless, "vless", "/vless", "vless path. example /vless")
 	pflag.BoolVar(&h2, "http2", true, "enable http2")
 	pflag.BoolVar(&h3, "http3", true, "enable http3")
 	pflag.BoolVar(&insecure, "insecure", false, "enable proxy protocols on insecure connections")
@@ -72,38 +73,34 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
 	var (
-		setHeader  func(handlerFunc http.Header) error
-		quicServer *http3.Server
+		setHeader func(handlerFunc http.Header) error
+		h3Server  *http3.Server
 	)
 
 	if h3 && httpsAddr != "" {
-		quicServer = &http3.Server{}
-		setHeader = quicServer.SetQuicHeaders
+		h3Server = &http3.Server{
+			Addr: httpsAddr,
+		}
+		setHeader = h3Server.SetQuicHeaders
 	}
 
-	h := proxyHandler(StaticRoot, vless, parseAuthUsers(authUsers), setHeader, insecure)
+	proxyHandle := proxyHandler(StaticRoot, vless, parseAuthUsers(authUsers), setHeader, insecure)
 
 	wg := sync.WaitGroup{}
 
-	if httpAddr != "" {
-		l, err := net.Listen("tcp", httpAddr)
+	if httpsAddr != "" {
+		l, err := net.Listen("tcp", httpsAddr)
 		if err != nil {
 			logrus.Fatal(err)
 		}
-		s := http.Server{}
-		if insecure || httpsAddr == "" {
-			s.Handler = h
-		} else {
-			s.Handler = http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-				u := request.URL
-				u.Scheme = "https"
-				http.Redirect(writer, request, u.String(), http.StatusTemporaryRedirect)
-			})
+		httpsServer := &http.Server{Handler: proxyHandle}
+		if !h2 {
+			httpsServer.TLSNextProto = map[string]func(*http.Server, *tls.Conn, http.Handler){}
 		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			err = s.Serve(l)
+			err = httpsServer.ServeTLS(l, certFile, keyFile)
 			if err != nil && err != http.ErrServerClosed {
 				logrus.Fatal(err)
 			}
@@ -111,20 +108,16 @@ func main() {
 		}()
 		go func() {
 			<-ctx.Done()
-			_ = s.Shutdown(context.TODO())
+			_ = httpsServer.Shutdown(context.TODO())
 		}()
 	}
 
-	if quicServer != nil {
-		quicServer.Server = &http.Server{
-			Addr:    httpsAddr,
-			Handler: h,
-		}
+	if h3Server != nil {
+		h3Server.Handler = proxyHandle
 		wg.Add(1)
 		go func() {
-
 			defer wg.Done()
-			err := quicServer.ListenAndServeTLS(certFile, keyFile)
+			err := h3Server.ListenAndServeTLS(certFile, keyFile)
 			if err != nil {
 				logrus.Fatal(err)
 			}
@@ -132,24 +125,25 @@ func main() {
 		}()
 		go func() {
 			<-ctx.Done()
-			_ = quicServer.Shutdown(context.TODO())
+			_ = h3Server.Close()
 		}()
 	}
 
-	if httpsAddr != "" {
-		l, err := net.Listen("tcp", httpsAddr)
+	if httpAddr != "" {
+		l, err := net.Listen("tcp", httpAddr)
 		if err != nil {
 			logrus.Fatal(err)
 		}
-		s := &http.Server{Handler: h}
-		if !h2 {
-			s.TLSNextProto = map[string]func(*http.Server, *tls.Conn, http.Handler){}
+		httpServer := &http.Server{
+			Handler: proxyHandle,
+		}
+		if !insecure && httpsAddr != "" {
+			httpServer.Handler = http.HandlerFunc(RedirectHTTPS)
 		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			s := http.Server{Handler: h}
-			err = s.ServeTLS(l, certFile, keyFile)
+			err = httpServer.Serve(l)
 			if err != nil && err != http.ErrServerClosed {
 				logrus.Fatal(err)
 			}
@@ -157,8 +151,16 @@ func main() {
 		}()
 		go func() {
 			<-ctx.Done()
-			_ = s.Shutdown(context.TODO())
+			_ = httpServer.Shutdown(context.TODO())
 		}()
 	}
 	wg.Wait()
+}
+
+func init() {
+	logrus.StandardLogger().SetFormatter(&logrus.TextFormatter{
+		ForceColors:     true,
+		TimestampFormat: "15:04:05",
+	})
+	logrus.StandardLogger().SetReportCaller(true)
 }

@@ -3,8 +3,10 @@ package main
 import (
 	"net/http"
 
-	"github.com/lyp256/proxy"
 	"github.com/sirupsen/logrus"
+
+	"github.com/lyp256/proxy/protocol/hproxy"
+	"github.com/lyp256/proxy/protocol/vless"
 )
 
 func proxyHandler(
@@ -19,11 +21,10 @@ func proxyHandler(
 	}
 	return &handle{
 		static:    staticHandle,
-		proxy:     proxy.NewHTTPProxyHandler(),
-		vless:     proxy.NewVLESSHandler(),
+		proxy:     hproxy.NewProxyHandler(),
+		vless:     vless.NewHandler(),
 		vlessPath: vlessPath,
 		users:     authUsers,
-		insecure:  insecure,
 		setHeader: setHeader,
 	}
 }
@@ -34,7 +35,6 @@ type handle struct {
 	vless     http.Handler
 	vlessPath string
 	users     auth
-	insecure  bool
 	setHeader func(header http.Header) error
 }
 
@@ -49,15 +49,13 @@ func (h handle) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 }
 
 func (h handle) serveHTTP(writer http.ResponseWriter, request *http.Request) {
-	if h.insecure || request.TLS != nil {
-		if h.vlessPath != "" && request.URL.Path == h.vlessPath {
-			h.vless.ServeHTTP(writer, request)
-			return
-		}
-		if h.proxyAuth(request.Header) {
-			h.proxy.ServeHTTP(writer, request)
-			return
-		}
+	if h.vlessPath != "" && request.URL.Path == h.vlessPath {
+		h.vless.ServeHTTP(writer, request)
+		return
+	}
+	if h.proxyAuth(request.Header) {
+		h.proxy.ServeHTTP(writer, request)
+		return
 	}
 	if h.static != nil {
 		h.static.ServeHTTP(writer, request)
@@ -68,11 +66,19 @@ func (h handle) serveHTTP(writer http.ResponseWriter, request *http.Request) {
 
 func (h handle) proxyAuth(header http.Header) bool {
 	if len(h.users) == 0 {
-		return true
+		return false
 	}
-	user, passwd, ok := proxy.GetProxyBaseAuth(header)
+	user, passwd, ok := hproxy.GetProxyBaseAuth(header)
 	if !ok {
 		return false
 	}
 	return h.users.Auth(user, passwd)
+}
+
+func RedirectHTTPS(writer http.ResponseWriter, request *http.Request) {
+	u := *request.URL
+	u.Host = request.Host
+	u.Scheme = "https"
+	http.Redirect(writer, request, u.String(), http.StatusPermanentRedirect)
+	return
 }

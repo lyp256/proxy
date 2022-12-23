@@ -36,6 +36,13 @@ func newSendQueue(conn sendConn) sender {
 func (h *sendQueue) Send(p *packetBuffer) {
 	select {
 	case h.queue <- p:
+		// clear available channel if we've reached capacity
+		if len(h.queue) == sendQueueCapacity {
+			select {
+			case <-h.available:
+			default:
+			}
+		}
 	case <-h.runStopped:
 	default:
 		panic("sendQueue.Send would have blocked")
@@ -64,7 +71,13 @@ func (h *sendQueue) Run() error {
 			shouldClose = true
 		case p := <-h.queue:
 			if err := h.conn.Write(p.Data); err != nil {
-				return err
+				// This additional check enables:
+				// 1. Checking for "datagram too large" message from the kernel, as such,
+				// 2. Path MTU discovery,and
+				// 3. Eventual detection of loss PingFrame.
+				if !isMsgSizeErr(err) {
+					return err
+				}
 			}
 			p.Release()
 			select {
