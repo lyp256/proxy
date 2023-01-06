@@ -32,7 +32,7 @@ test:
 
 .PHONY: build
 build:
-	CGO_ENABLED=0 go build -ldflags "-X $(VERPKG).Version=$(VER) -X $(VERPKG).CommitID=$(COMMIT)" -o build/ ./cmd/...
+	CGO_ENABLED=0 go build -tags include_oss,include_gcs -ldflags "-X $(VERPKG).Version=$(VER) -X $(VERPKG).CommitID=$(COMMIT)" -o build/ ./cmd/...
 
 .PHONY: docker-build
 docker-build:

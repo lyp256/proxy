@@ -10,61 +10,58 @@ import (
 	"sync"
 	"syscall"
 
+	"github.com/gin-gonic/gin"
 	"github.com/lucas-clemente/quic-go/http3"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/pflag"
 
+	"github.com/lyp256/proxy/pkg/auth"
+	"github.com/lyp256/proxy/pkg/config"
 	"github.com/lyp256/proxy/version"
 )
 
 func main() {
 	var (
-		httpAddr   string
-		httpsAddr  string
-		certFile   string
-		keyFile    string
-		StaticRoot string
-		authUsers  []string
-		logLevel   string
-		h2         bool
-		h3         bool
-		vless      string
-		insecure   bool
-		v          bool
+		configPath              string
+		versionDump, configDump bool
 	)
-	pflag.StringVar(&httpAddr, "http", ":80", "listen http port. example :80")
-	pflag.StringVar(&httpsAddr, "https", "", "listen https port. example :443")
-	pflag.StringVar(&certFile, "cert", "", "tls cert file")
-	pflag.StringVar(&keyFile, "key", "", "tls key file")
-	pflag.StringVar(&StaticRoot, "static", "", "static resource root. example /srv/www")
-	pflag.StringSliceVarP(&authUsers, "user", "u", nil, "proxy auth user. example admin:123456")
-	pflag.StringVar(&logLevel, "log", "warning", "log level. one of panic,fatal,error,warning,info,debug,trace")
-	pflag.StringVar(&vless, "vless", "/vless", "vless path. example /vless")
-	pflag.BoolVar(&h2, "http2", true, "enable http2")
-	pflag.BoolVar(&h3, "http3", true, "enable http3")
-	pflag.BoolVar(&insecure, "insecure", false, "enable proxy protocols on insecure connections")
-	pflag.BoolVarP(&v, "version", "v", false, "print version")
+	pflag.StringVar(&configPath, "config", "config.yaml", "configure file")
+	pflag.BoolVarP(&versionDump, "version", "v", false, "print version")
+	pflag.BoolVarP(&configDump, "dump", "d", false, "print config")
+
 	pflag.Parse()
-	if v {
+	if versionDump {
 		version.Print(os.Stdout)
 		return
 	}
 
-	if httpAddr == "" && httpsAddr == "" {
+	conf := config.Default()
+
+	err := conf.LoadFile(configPath)
+	if err != nil {
+		logrus.Fatal(err)
+	}
+
+	if configDump {
+		os.Stdout.Write(conf.Marshal())
+		return
+	}
+
+	if conf.HTTP == "" && conf.HTTPS == "" {
 		pflag.Usage()
 		return
 	}
-	if httpsAddr != "" {
+	if conf.HTTPS != "" {
 		switch {
-		case certFile == "":
+		case conf.TLS.Cert == "":
 			logrus.Fatal("cert file must be specified")
-		case keyFile == "":
+		case conf.TLS.Key == "":
 			logrus.Fatal("key file must be specified")
 		}
 	}
 
-	if logLevel != "" {
-		level, err := logrus.ParseLevel(logLevel)
+	if conf.LOG != "" {
+		level, err := logrus.ParseLevel(conf.LOG)
 		if err != nil {
 			logrus.Fatal(err)
 		}
@@ -72,35 +69,43 @@ func main() {
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
+
+	auth.Load(conf.Users...)
+
+	en := newEngine(conf)
+
 	var (
-		setHeader func(handlerFunc http.Header) error
-		h3Server  *http3.Server
+		h3Server    *http3.Server
+		httpsServer *http.Server
+		httpServer  *http.Server
 	)
-
-	if h3 && httpsAddr != "" {
+	if !conf.EnableHTTP3 && conf.HTTPS != "" {
 		h3Server = &http3.Server{
-			Addr: httpsAddr,
+			Addr: conf.HTTPS,
 		}
-		setHeader = h3Server.SetQuicHeaders
+		en.Use(func(c *gin.Context) {
+			err := h3Server.SetQuicHeaders(c.Request.Header)
+			if err != nil {
+				logrus.Errorf("setQuicHeaders:%s", err)
+			}
+		})
 	}
-
-	proxyHandle := proxyHandler(StaticRoot, vless, parseAuthUsers(authUsers), setHeader, insecure)
 
 	wg := sync.WaitGroup{}
 
-	if httpsAddr != "" {
-		l, err := net.Listen("tcp", httpsAddr)
+	if conf.HTTPS != "" {
+		l, err := net.Listen("tcp", conf.HTTPS)
 		if err != nil {
 			logrus.Fatal(err)
 		}
-		httpsServer := &http.Server{Handler: proxyHandle}
-		if !h2 {
+		httpsServer = &http.Server{Handler: en}
+		if conf.EnableHTTP2 {
 			httpsServer.TLSNextProto = map[string]func(*http.Server, *tls.Conn, http.Handler){}
 		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			err = httpsServer.ServeTLS(l, certFile, keyFile)
+			err = httpsServer.ServeTLS(l, conf.TLS.Cert, conf.TLS.Key)
 			if err != nil && err != http.ErrServerClosed {
 				logrus.Fatal(err)
 			}
@@ -113,11 +118,11 @@ func main() {
 	}
 
 	if h3Server != nil {
-		h3Server.Handler = proxyHandle
+		h3Server.Handler = en
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			err := h3Server.ListenAndServeTLS(certFile, keyFile)
+			err := h3Server.ListenAndServeTLS(conf.TLS.Cert, conf.TLS.Key)
 			if err != nil {
 				logrus.Fatal(err)
 			}
@@ -129,15 +134,15 @@ func main() {
 		}()
 	}
 
-	if httpAddr != "" {
-		l, err := net.Listen("tcp", httpAddr)
+	if conf.HTTP != "" {
+		l, err := net.Listen("tcp", conf.HTTP)
 		if err != nil {
 			logrus.Fatal(err)
 		}
-		httpServer := &http.Server{
-			Handler: proxyHandle,
+		httpServer = &http.Server{
+			Handler: en,
 		}
-		if !insecure && httpsAddr != "" {
+		if !conf.Insecure && conf.HTTPS != "" {
 			httpServer.Handler = http.HandlerFunc(RedirectHTTPS)
 		}
 		wg.Add(1)
