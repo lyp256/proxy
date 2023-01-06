@@ -1,78 +1,98 @@
 package main
 
 import (
+	"context"
+	"fmt"
 	"net/http"
 
-	"github.com/sirupsen/logrus"
+	"github.com/gin-gonic/gin"
 
-	"github.com/lyp256/proxy/protocol/hproxy"
-	"github.com/lyp256/proxy/protocol/vless"
+	"github.com/lyp256/proxy/pkg/auth"
+	"github.com/lyp256/proxy/pkg/config"
+	"github.com/lyp256/proxy/pkg/httpproxy"
+	"github.com/lyp256/proxy/pkg/registry"
+	"github.com/lyp256/proxy/pkg/vless"
 )
 
-func proxyHandler(
-	staticRoot,
-	vlessPath string,
-	authUsers auth,
-	setHeader func(header http.Header) error,
-	insecure bool) *handle {
-	var staticHandle http.Handler
-	if staticRoot != "" {
-		staticHandle = http.FileServer(http.Dir(staticRoot))
-	}
-	return &handle{
-		static:    staticHandle,
-		proxy:     hproxy.NewProxyHandler(),
-		vless:     vless.NewHandler(),
-		vlessPath: vlessPath,
-		users:     authUsers,
-		setHeader: setHeader,
-	}
-}
+func newEngine(
+	conf *config.Config) *gin.Engine {
+	e := gin.New()
 
-type handle struct {
-	static    http.Handler
-	proxy     http.Handler
-	vless     http.Handler
-	vlessPath string
-	users     auth
-	setHeader func(header http.Header) error
-}
+	if conf.Component.Proxy.Enable {
+		proxyConf := conf.Component.Proxy
+		h := httpproxy.NewProxyHandler()
+		e.Use(func(context *gin.Context) {
+			if httpproxy.ProxyRequest(context.Request) {
+				switch proxyConf.Auth {
+				case auth.GlobalUser, "":
+					username, passwd, ok := httpproxy.GetProxyBaseAuth(context.Request.Header)
+					if !ok {
+						if proxyConf.Active {
+							context.Status(http.StatusProxyAuthRequired)
+							context.Abort()
+							return
+						}
+						return
+					}
+					if auth.Auth(username, passwd) {
+						h.ServeHTTP(context.Writer, context.Request)
+						context.Abort()
+					}
+					return
+				case "none":
+				default:
+					return
+				}
+			}
+		})
+	}
 
-func (h handle) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
-	if h.setHeader != nil {
-		err := h.setHeader(writer.Header())
-		if err != nil {
-			logrus.Error(err)
-		}
-	}
-	h.serveHTTP(writer, request)
-}
+	if conf.Component.Vless.Enable {
+		vlessConf := conf.Component.Vless
+		// uuid auth
+		h := vless.NewHTTPHandler(vless.WithPreHandle(func(ctx context.Context, request vless.Requester) error {
+			user := getUser(ctx)
+			if user != nil {
+				return nil
+			}
+			uid := request.UUID()
+			user = auth.GetByUUID(uid.String())
+			if user == nil {
+				return fmt.Errorf("not get user：%s", uid)
+			}
+			return nil
+		}))
 
-func (h handle) serveHTTP(writer http.ResponseWriter, request *http.Request) {
-	if h.vlessPath != "" && request.URL.Path == h.vlessPath {
-		h.vless.ServeHTTP(writer, request)
-		return
+		e.Any(conf.Component.Vless.Path, func(c *gin.Context) {
+			switch vlessConf.Auth {
+			case auth.GlobalUser, "":
+				username := c.Param("username")
+				password := c.Param("password")
+				if user := auth.GetByUsername(username); user != nil && user.Password == password {
+					c.Request = c.Request.WithContext(withUser(c, user))
+				}
+				h.ServeHTTP(c.Writer, c.Request)
+			case "none":
+				c.Request = c.Request.WithContext(withUser(c, &auth.User{Username: "anonymous"}))
+				h.ServeHTTP(c.Writer, c.Request)
+			default:
+				c.AbortWithStatus(http.StatusNotFound)
+			}
+			c.Abort()
+		})
 	}
-	if h.proxyAuth(request.Header) {
-		h.proxy.ServeHTTP(writer, request)
-		return
-	}
-	if h.static != nil {
-		h.static.ServeHTTP(writer, request)
-		return
-	}
-	http.NotFound(writer, request)
-}
 
-func (h handle) proxyAuth(header http.Header) bool {
-	if len(h.users) == 0 {
-		return false
+	if conf.Component.Registry.Enable {
+		h := gin.WrapF(func(writer http.ResponseWriter, request *http.Request) {
+			rh := registry.NewHTTPHandler(&conf.Component.Registry.Config)
+			rh.ServeHTTP(writer, request)
+		})
+		e.Any("/v2/*all", h)
 	}
-	user, passwd, ok := hproxy.GetProxyBaseAuth(header)
-	if !ok {
-		return false
+	if conf.Component.Static.Enable {
+		e.NoRoute(gin.WrapH(http.FileServer(http.Dir(conf.Component.Static.Root))))
 	}
-	return h.users.Auth(user, passwd)
+	return e
 }
 
 func RedirectHTTPS(writer http.ResponseWriter, request *http.Request) {
