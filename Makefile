@@ -1,10 +1,24 @@
 VER=develop
-COMMIT= $(shell git rev-parse --short HEAD)
-GOMODULE= $(shell go list -m)
+COMMIT=$(shell git rev-parse --short HEAD)
+GOMODULE=$(shell go list -m)
 VERPKG=$(GOMODULE)/version
-IMAGE=docker.io/lyp256/proxy:latest
 
-PKGS= $(shell go list ./... |grep -v vendor |xargs echo)
+PKGS=$(shell go list ./... |grep -v vendor |xargs echo)
+
+ifdef REF_NAME
+TAG:=$(REF_NAME)
+else
+TAG:=dev
+endif
+
+ifneq ($(REF_TYPE),tag)
+TAG:=$(TAG)-$(COMMIT)
+endif
+
+IMAGE=docker.io/lyp256/proxy:$(TAG)
+
+print:
+	echo $(IMAGE)
 
 
 .PHONY: fmt
