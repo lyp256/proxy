@@ -25,7 +25,7 @@ func main() {
 		configPath              string
 		versionDump, configDump bool
 	)
-	pflag.StringVar(&configPath, "config", "config.yaml", "configure file")
+	pflag.StringVarP(&configPath, "config", "c", "config.yaml", "configure file")
 	pflag.BoolVarP(&versionDump, "version", "v", false, "print version")
 	pflag.BoolVarP(&configDump, "dump", "d", false, "print config")
 
