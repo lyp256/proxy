@@ -84,7 +84,7 @@ func main() {
 			Addr: conf.HTTPS,
 		}
 		en.Use(func(c *gin.Context) {
-			err := h3Server.SetQuicHeaders(c.Request.Header)
+			err := h3Server.SetQuicHeaders(c.Writer.Header())
 			if err != nil {
 				logrus.Errorf("setQuicHeaders:%s", err)
 			}
