@@ -79,7 +79,7 @@ func main() {
 		httpsServer *http.Server
 		httpServer  *http.Server
 	)
-	if !conf.EnableHTTP3 && conf.HTTPS != "" {
+	if conf.EnableHTTP3 && conf.HTTPS != "" {
 		h3Server = &http3.Server{
 			Addr: conf.HTTPS,
 		}
@@ -99,7 +99,7 @@ func main() {
 			logrus.Fatal(err)
 		}
 		httpsServer = &http.Server{Handler: en}
-		if conf.EnableHTTP2 {
+		if !conf.EnableHTTP2 {
 			httpsServer.TLSNextProto = map[string]func(*http.Server, *tls.Conn, http.Handler){}
 		}
 		wg.Add(1)
