@@ -55,7 +55,7 @@ func (h *handler) Handle(ctx context.Context, connect io.ReadWriteCloser) error 
 		Version: request.Version(),
 		Addons:  nil,
 	}
-	err = resp.ToWriter(connect)
+	_, err = resp.WriteTo(connect)
 	if err != nil {
 		return fmt.Errorf("reply :%w", err)
 	}

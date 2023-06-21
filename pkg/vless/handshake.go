@@ -147,11 +147,11 @@ type Response struct {
 	Addons  []byte
 }
 
-func (r *Response) ToWriter(w io.Writer) error {
-	_, err := w.Write([]byte{r.Version, byte(len(r.Addons))})
+func (r *Response) WriteTo(w io.Writer) (int64, error) {
+	n1, err := w.Write([]byte{r.Version, byte(len(r.Addons))})
 	if err != nil {
-		return err
+		return int64(n1), err
 	}
-	_, err = w.Write(r.Addons)
-	return err
+	n2, err := w.Write(r.Addons)
+	return int64(n1 + n2), err
 }
