@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"path"
 
 	"github.com/gin-gonic/gin"
 
@@ -63,7 +64,7 @@ func newEngine(
 			return nil
 		}))
 
-		e.Any(conf.Component.Vless.Path, func(c *gin.Context) {
+		var fn = func(c *gin.Context) {
 			switch vlessConf.Auth {
 			case auth.GlobalUser, "":
 				username := c.Param("username")
@@ -79,7 +80,10 @@ func newEngine(
 				c.AbortWithStatus(http.StatusNotFound)
 			}
 			c.Abort()
-		})
+		}
+
+		e.Any(conf.Component.Vless.Path, fn)
+		e.Any(path.Join(conf.Component.Vless.Path, "*other"), fn)
 	}
 
 	if conf.Component.Registry.Enable {
