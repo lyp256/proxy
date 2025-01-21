@@ -11,7 +11,7 @@ import (
 	"syscall"
 
 	"github.com/gin-gonic/gin"
-	"github.com/lucas-clemente/quic-go/http3"
+	"github.com/quic-go/quic-go/http3"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/pflag"
 
@@ -84,7 +84,7 @@ func main() {
 			Addr: conf.HTTPS,
 		}
 		en.Use(func(c *gin.Context) {
-			err := h3Server.SetQuicHeaders(c.Writer.Header())
+			err := h3Server.SetQUICHeaders(c.Writer.Header())
 			if err != nil {
 				logrus.Errorf("setQuicHeaders:%s", err)
 			}
