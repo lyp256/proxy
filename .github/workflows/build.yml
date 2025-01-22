@@ -38,20 +38,19 @@ jobs:
         run: make build
 
       - name: upload artifact
-        uses: actions/upload-artifact@v2
+        uses: actions/upload-artifact@v4
         with:
           name: binary
           path: build/
 
-
   oci:
     name: OCI
     runs-on: ubuntu-latest
-    needs: Build
+    needs: build
     steps:
       - uses: actions/checkout@v2
 
-      - uses: actions/download-artifact@v2
+      - uses: actions/download-artifact@v4
         with:
           name: binary
           path: build/
